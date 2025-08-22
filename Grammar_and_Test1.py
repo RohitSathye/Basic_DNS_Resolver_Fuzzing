@@ -1,109 +1,76 @@
 import random
 import re
-from fuzzingbook.Grammars import Grammar
 import dns.resolver
+from fuzzingbook.Grammars import Grammar
 
-result =[]
-Errors = []
-queries = []
-sub_results = []
+START_SYMBOL = "<start>"
+RE_NONTERMINAL = re.compile(r'(<[^<> ]*>)')
+
+# Grammar for DNS queries
+URL_GRAMMAR: Grammar = {
+    "<start>": ["<hostname> <rtype> <rclass>"],
+    "<hostname>": [
+        "google.com", "vt.edu", "facebook.com",
+        "nonexistentdomain.abc", "xn--d1acufc.xn--p1ai",  # punycode
+        "verylong" * 30 + ".com"                          # stress test
+    ],
+    "<rtype>": [
+        "A", "NS", "CNAME", "SOA", "MX", "TXT",
+        "AAAA", "SRV", "PTR", "DNSKEY", "RRSIG",
+        "INVALIDTYPE"  # invalid token
+    ],
+    "<rclass>": ["IN", "CH", "HS", "NONE", "INVALIDCLASS"]
+}
 
 def nonterminals(expansion):
     if isinstance(expansion, tuple):
         expansion = expansion[0]
-
     return RE_NONTERMINAL.findall(expansion)
 
-def is_nonterminal(s):
-    return RE_NONTERMINAL.match(s)
-    
-START_SYMBOL = "<start>"
-RE_NONTERMINAL = re.compile(r'(<[^<> ]*>)')
-
-class ExpansionError(Exception):
-    pass
-
-URL_GRAMMAR: Grammar = {
-    "<start>":
-        ["<query>"],
-    "<query>":
-        ["<scheme>.<host>:<Type>,<class>"],
-    "<scheme>":
-        ["www"],
-    "<host>":  
-        ["vt.edu", "google.com", "linkedin.com","whentowork.com","usa.gov","facebook.com"],
-    "<Type>":
-        ["type A","type NS","type MD","type MF","type CNAME","type SOA","type MB","type MG","type MR","type NULL","type WKS","type PTR","type HINFO","type MINFO","type MX","type TXT"],
-    "<class>":
-        ["class IN","class CS","class CH","class HS"]    
-}
-
-def simple_grammar_fuzzer(grammar: Grammar, 
-                          start_symbol: str = START_SYMBOL,
-                          max_nonterminals: int = 10,
-                          max_expansion_trials: int = 100,
-                          log: bool = False) -> str:
-    
+def simple_grammar_fuzzer(grammar, start_symbol=START_SYMBOL,
+                          max_nonterminals=10, max_expansion_trials=100):
     term = start_symbol
     expansion_trials = 0
-
     while len(nonterminals(term)) > 0:
         symbol_to_expand = random.choice(nonterminals(term))
         expansions = grammar[symbol_to_expand]
         expansion = random.choice(expansions)
-        # In later chapters, we allow expansions to be tuples,
-        # with the expansion being the first element
         if isinstance(expansion, tuple):
             expansion = expansion[0]
-
         new_term = term.replace(symbol_to_expand, expansion, 1)
-
         if len(nonterminals(new_term)) < max_nonterminals:
             term = new_term
-            if log:
-                print("%-40s" % (symbol_to_expand + " -> " + expansion), term)
             expansion_trials = 0
         else:
             expansion_trials += 1
             if expansion_trials >= max_expansion_trials:
-                raise ExpansionError("Cannot expand " + repr(term))
-
+                raise Exception("Too many expansion trials")
     return term
 
-number_of_seeds = 10
-seeds = [
-    simple_grammar_fuzzer(
-        grammar=URL_GRAMMAR,
-        max_nonterminals=10) for i in range(number_of_seeds)]
-#print(*seeds,sep='\n')
+# Run fuzzing
+num_queries = 20
+queries = []
+results = []
+errors = []
 
-for i in seeds:
-    queries.append(i)
-    components = i.split(':')
-    #print(components[0][4:])
-    subcomponents = components[1].split(',')
-    #print(subcomponents)
-    types = subcomponents[0].split(' ')
-    #print(types[1])
-    classes = subcomponents[1].split(' ')
-    #print(classes[1])
+for _ in range(num_queries):
+    fuzzed_query = simple_grammar_fuzzer(URL_GRAMMAR)
+    parts = fuzzed_query.split(" ")
+    hostname, rtype, rclass = parts[0], parts[1], parts[2]
 
     try:
-        result_temp = dns.resolver.resolve(components[0][4:],types[1],classes[1])
-        #result.append(result_temp)
-        for val in result_temp:
-            server = val.to_text()
-            sub_results.append(server)
-        result.append(sub_results)
-        Errors.append("No Error")
-        #print(f"{result=}")
-    except Exception as Argument:
-        result.append("No result")
-        #file2_results.write("No result \n")
-        Errors.append(Argument)
+        sub_results = []
+        answer = dns.resolver.resolve(hostname, rtype, rclass)
+        for val in answer:
+            sub_results.append(val.to_text())
+        results.append(sub_results)
+        errors.append("No Error")
+    except Exception as e:
+        results.append([])
+        errors.append(str(e))
 
-#print(*queries,sep='\n')     
+    queries.append(fuzzed_query)
 
-print(f"{queries=}")
-print(f"{result=}")
-print(f"{Errors=}")
+# Print summary
+for q, r, e in zip(queries, results, errors):
+    print(f"Query: {q}\nResult: {r}\nError: {e}\n{'-'*50}")
